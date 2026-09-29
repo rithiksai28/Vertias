@@ -184,6 +184,39 @@ Grounds: ${investigation.summary.finalConfidenceReasoning?.join('; ') || 'Verifi
             </div>
           </header>
 
+          {/* SAHYOG Intake Information if present */}
+          {investigation.source === 'SAHYOG' && investigation.sahyogMetadata && (
+            <div className="p-4 bg-[#0a1017] border border-cyan-800/60 rounded-none space-y-2 font-mono text-xs">
+              <div className="flex items-center justify-between border-b border-cyan-900/50 pb-2">
+                <span className="font-bold text-cyan-300 flex items-center gap-1.5">
+                  <span>🛡️</span>
+                  <span>SAHYOG LAW ENFORCEMENT CASE INTAKE PARTICULARS</span>
+                </span>
+                <span className="text-[10px] px-2 py-0.5 bg-cyan-950 text-cyan-300 border border-cyan-800">
+                  REF: {investigation.sahyogMetadata.caseId}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px] pt-1">
+                <div>
+                  <span className="text-[#6c788d] block text-[10px] uppercase">Complainant Agency:</span>
+                  <span className="text-white">{investigation.sahyogMetadata.complainantAgency || 'Cyber Crime Division'}</span>
+                </div>
+                <div>
+                  <span className="text-[#6c788d] block text-[10px] uppercase">Statutory Offense / Injunction:</span>
+                  <span className="text-white">{investigation.sahyogMetadata.statutoryOffense || 'Section 66D IT Act / Section 420 IPC'}</span>
+                </div>
+                <div>
+                  <span className="text-[#6c788d] block text-[10px] uppercase">FIR Number:</span>
+                  <span className="text-zinc-200">{investigation.sahyogMetadata.metadata?.firNumber || 'N/A'}</span>
+                </div>
+                <div>
+                  <span className="text-[#6c788d] block text-[10px] uppercase">Incident Date / Category:</span>
+                  <span className="text-zinc-200">{investigation.sahyogMetadata.incidentDate || 'N/A'} · {investigation.sahyogMetadata.investigationType || 'Suspect Wallet Inquiry'}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Section 1: Executive Summary & Nearest Direct-Deposit VASP */}
           <section className="space-y-4">
             <h2 className="text-xs font-mono uppercase tracking-wider text-zinc-300 font-semibold border-b border-[#1c222c] pb-1.5">

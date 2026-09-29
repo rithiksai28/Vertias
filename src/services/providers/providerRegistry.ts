@@ -4,7 +4,7 @@
  */
 
 import { BlockchainNetwork } from '../../types/investigation';
-import { BlockchainProviderAdapter, NormalizedTransaction } from './types';
+import { BlockchainProviderAdapter, NormalizedTransaction, ProviderQueryResult, ProviderQueryOptions } from './types';
 import { BitcoinProviderAdapter } from './bitcoinProvider';
 import { EthereumProviderAdapter } from './ethereumProvider';
 import { TronProviderAdapter } from './tronProvider';
@@ -61,11 +61,35 @@ export class BlockchainProviderRegistry {
   public async fetchTransactions(
     network: BlockchainNetwork,
     address: string,
-    options?: { maxTxs?: number; timeRangePreset?: string }
+    options?: ProviderQueryOptions
   ): Promise<NormalizedTransaction[]> {
     const adapter = this.adapters.get(network);
     if (!adapter) return [];
     return adapter.fetchTransactions(address, options);
+  }
+
+  public async fetchTransactionsWithStatus(
+    network: BlockchainNetwork,
+    address: string,
+    options?: ProviderQueryOptions
+  ): Promise<ProviderQueryResult> {
+    const adapter = this.adapters.get(network);
+    if (!adapter) {
+      return {
+        transactions: [],
+        hasLiveIndexing: false,
+        statusMessage: `No adapter registered for network ${network}`,
+      };
+    }
+    if (adapter.fetchTransactionsWithStatus) {
+      return adapter.fetchTransactionsWithStatus(address, options);
+    }
+    const txs = await adapter.fetchTransactions(address, options);
+    return {
+      transactions: txs,
+      hasLiveIndexing: txs.length > 0,
+      statusMessage: txs.length > 0 ? `Retrieved ${txs.length} transactions.` : 'No transactions returned.',
+    };
   }
 
   public async fetchBalance(

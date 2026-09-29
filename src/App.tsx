@@ -105,6 +105,8 @@ export default function App() {
     maxHops: number;
     mode: 'DEMO' | 'LIVE';
     timeRangePreset?: 'all' | '24h' | '7d' | '30d' | '90d';
+    source?: 'MANUAL' | 'SAHYOG';
+    sahyogMetadata?: any;
   }) => {
     const inv = await apiClient.createInvestigation(params);
     setInvestigations((prev) => [inv, ...prev]);

@@ -273,6 +273,33 @@ export interface InvestigationSummary {
   primaryPath: string[]; // List of addresses from start to final VASP
 }
 
+export type InvestigationSource = 'MANUAL' | 'SAHYOG';
+
+export interface SahyogIntakePayload {
+  source: 'SAHYOG';
+  caseId: string;
+  walletAddress: string;
+  network: BlockchainNetwork;
+  investigationType?: string;
+  complainantAgency?: string;
+  incidentDate?: string;
+  statutoryOffense?: string;
+  metadata?: Record<string, any>;
+  isDemo?: boolean;
+}
+
+export interface CommonInvestigationRequest {
+  source: InvestigationSource;
+  startingAddress: string;
+  network: BlockchainNetwork;
+  caseName: string;
+  caseReference: string;
+  maxHops: number;
+  mode: 'DEMO' | 'LIVE';
+  timeRangePreset?: 'all' | '24h' | '7d' | '30d' | '90d';
+  sahyogMetadata?: SahyogIntakePayload;
+}
+
 export interface Investigation {
   id: string;
   caseName: string;
@@ -282,6 +309,10 @@ export interface Investigation {
   status: InvestigationStatus;
   maxHops: number;
   mode: 'DEMO' | 'LIVE';
+  dataMode?: 'LIVE' | 'DEMO';
+  source?: InvestigationSource;
+  sahyogMetadata?: SahyogIntakePayload;
+  tracingDiagnostic?: string;
   timeRangePreset?: 'all' | '24h' | '7d' | '30d' | '90d';
   notes: Array<{
     id: string;

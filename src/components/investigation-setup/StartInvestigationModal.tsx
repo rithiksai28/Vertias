@@ -4,17 +4,19 @@
  */
 
 import React, { useState } from 'react';
-import { BlockchainNetwork } from '../../types/investigation';
+import { BlockchainNetwork, SahyogIntakePayload } from '../../types/investigation';
+import { DEMO_SAHYOG_CASES, sahyogAdapter } from '../../services/sahyog/sahyogAdapter';
 import {
   ShieldAlert,
   X,
   Play,
   CheckCircle2,
   Loader2,
-  HelpCircle,
   AlertCircle,
+  FileBadge,
+  Building2,
+  Server,
   Info,
-  Sparkles,
 } from 'lucide-react';
 
 interface StartInvestigationModalProps {
@@ -28,6 +30,8 @@ interface StartInvestigationModalProps {
     maxHops: number;
     mode: 'DEMO' | 'LIVE';
     timeRangePreset?: 'all' | '24h' | '7d' | '30d' | '90d';
+    source?: 'MANUAL' | 'SAHYOG';
+    sahyogMetadata?: SahyogIntakePayload;
   }) => Promise<void>;
 }
 
@@ -36,6 +40,9 @@ export const StartInvestigationModal: React.FC<StartInvestigationModalProps> = (
   onClose,
   onSubmit,
 }) => {
+  const [sourceTab, setSourceTab] = useState<'MANUAL' | 'SAHYOG'>('MANUAL');
+
+  // Mode 1: Manual State
   const [caseName, setCaseName] = useState('');
   const [caseReference, setCaseReference] = useState('');
   const [startingAddress, setStartingAddress] = useState('');
@@ -44,6 +51,9 @@ export const StartInvestigationModal: React.FC<StartInvestigationModalProps> = (
   const [timeRange, setTimeRange] = useState<'all' | '24h' | '7d' | '30d' | '90d'>('30d');
   const [mode, setMode] = useState<'DEMO' | 'LIVE'>('DEMO');
   const [error, setError] = useState<string | null>(null);
+
+  // Mode 2: SAHYOG State
+  const [selectedSahyog, setSelectedSahyog] = useState<SahyogIntakePayload>(DEMO_SAHYOG_CASES[0]);
 
   // Investigation Execution Progress State
   const [isProcessing, setIsProcessing] = useState(false);
@@ -64,14 +74,16 @@ export const StartInvestigationModal: React.FC<StartInvestigationModalProps> = (
   const validateAddress = (addr: string, net: BlockchainNetwork): boolean => {
     const trimmed = addr.trim();
     if (!trimmed) return false;
-    if (net === 'ethereum' || net === 'polygon' || net === 'arbitrum') {
+    if (net === 'ethereum' || net === 'polygon' || net === 'arbitrum' || net === 'bsc') {
       return /^0x[a-fA-F0-9]{40}$/.test(trimmed);
     }
     if (net === 'bitcoin') {
       return (
-        /^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,39}$/.test(trimmed) ||
-        /^bc1q[a-z0-9]{38}$/.test(trimmed)
+        /^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}$/i.test(trimmed)
       );
+    }
+    if (net === 'tron') {
+      return /^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(trimmed);
     }
     return true;
   };
@@ -80,17 +92,35 @@ export const StartInvestigationModal: React.FC<StartInvestigationModalProps> = (
     e.preventDefault();
     setError(null);
 
-    const trimmedAddress = startingAddress.trim();
-    if (!trimmedAddress) {
-      setError('Please provide a target suspicious wallet address.');
-      return;
-    }
+    let finalAddress = startingAddress.trim();
+    let finalNetwork = network;
+    let finalCaseName = caseName.trim();
+    let finalCaseRef = caseReference.trim();
+    let finalMetadata: SahyogIntakePayload | undefined;
 
-    if (!validateAddress(trimmedAddress, network)) {
-      setError(
-        `Invalid address format for ${network.toUpperCase()}. Expected 42-character hexadecimal format (0x...).`
-      );
-      return;
+    if (sourceTab === 'SAHYOG') {
+      finalAddress = selectedSahyog.walletAddress.trim();
+      finalNetwork = selectedSahyog.network;
+      finalCaseName = `[SAHYOG] ${selectedSahyog.caseId} — ${selectedSahyog.investigationType || 'Suspect Wallet Inquiry'}`;
+      finalCaseRef = selectedSahyog.caseId;
+      finalMetadata = selectedSahyog;
+    } else {
+      if (!finalAddress) {
+        setError('Please provide a target suspicious wallet address.');
+        return;
+      }
+      if (!validateAddress(finalAddress, finalNetwork)) {
+        setError(
+          `Invalid address format for ${finalNetwork.toUpperCase()}. Please check the address format.`
+        );
+        return;
+      }
+      if (!finalCaseName) {
+        finalCaseName = `Investigation ${finalAddress.slice(0, 10)}...`;
+      }
+      if (!finalCaseRef) {
+        finalCaseRef = `CASE-${Date.now().toString().slice(-6)}`;
+      }
     }
 
     setIsProcessing(true);
@@ -104,13 +134,15 @@ export const StartInvestigationModal: React.FC<StartInvestigationModalProps> = (
 
     try {
       await onSubmit({
-        caseName: caseName.trim() || `Investigation ${trimmedAddress.slice(0, 10)}...`,
-        caseReference: caseReference.trim() || `CASE-${Date.now().toString().slice(-6)}`,
-        startingAddress: trimmedAddress,
-        network,
+        source: sourceTab,
+        caseName: finalCaseName,
+        caseReference: finalCaseRef,
+        startingAddress: finalAddress,
+        network: finalNetwork,
         maxHops,
         mode,
         timeRangePreset: timeRange,
+        sahyogMetadata: finalMetadata,
       });
       setIsProcessing(false);
       onClose();
@@ -158,9 +190,9 @@ export const StartInvestigationModal: React.FC<StartInvestigationModalProps> = (
           <div className="flex items-center gap-2">
             <ShieldAlert className="w-5 h-5 text-cyan-400" />
             <div>
-              <h3 className="font-bold text-sm text-slate-100">Start New Forensic Investigation</h3>
+              <h3 className="font-bold text-sm text-slate-100">Start Forensic Investigation</h3>
               <p className="text-slate-400 text-[11px]">
-                Trace virtual asset movements, discover connected wallets, and attribute VASP endpoints.
+                Trace virtual asset flows and attribute terminal VASP endpoints via the common engine.
               </p>
             </div>
           </div>
@@ -168,7 +200,7 @@ export const StartInvestigationModal: React.FC<StartInvestigationModalProps> = (
             <button
               type="button"
               onClick={onClose}
-              className="p-1 text-slate-400 hover:text-slate-200 rounded hover:bg-slate-800 transition-colors"
+              className="p-1 text-slate-400 hover:text-slate-200 rounded hover:bg-slate-800 transition-colors cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
@@ -215,39 +247,32 @@ export const StartInvestigationModal: React.FC<StartInvestigationModalProps> = (
             </div>
           </div>
         ) : (
-          /* Input Form */
+          /* Intake Tabs & Form */
           <form onSubmit={handleStart} className="p-5 space-y-4">
-            {/* Quick Preset Buttons */}
-            <div className="p-2.5 bg-slate-950/80 border border-slate-800 rounded">
-              <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1.5">
-                <span className="font-semibold uppercase tracking-wider text-[10px]">
-                  Quick Load Demo Cases
-                </span>
-                <span>Select to populate verified sample flow</span>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => loadPreset('ransomware')}
-                  className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded text-slate-200 text-xs font-medium transition-colors"
-                >
-                  Silver-Fox Ransomware (4 Hops → Binance)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => loadPreset('darknet')}
-                  className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded text-slate-200 text-xs font-medium transition-colors"
-                >
-                  Darknet Escrow (3 Hops → Kraken)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => loadPreset('mixer')}
-                  className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded text-slate-200 text-xs font-medium transition-colors"
-                >
-                  Phishing Drain (Sanctioned Tornado)
-                </button>
-              </div>
+            {/* Mode Switch Tabs */}
+            <div className="flex border border-slate-800 bg-slate-950 p-1 rounded gap-1">
+              <button
+                type="button"
+                onClick={() => setSourceTab('MANUAL')}
+                className={`flex-1 py-1.5 px-3 rounded text-xs font-mono font-medium transition-colors cursor-pointer ${
+                  sourceTab === 'MANUAL'
+                    ? 'bg-[#1a1708] border border-[#f5d13b]/60 text-[#f5d13b]'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Mode 1: Manual Wallet
+              </button>
+              <button
+                type="button"
+                onClick={() => setSourceTab('SAHYOG')}
+                className={`flex-1 py-1.5 px-3 rounded text-xs font-mono font-medium transition-colors cursor-pointer ${
+                  sourceTab === 'SAHYOG'
+                    ? 'bg-cyan-950/70 border border-cyan-500/60 text-cyan-300'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Mode 2: SAHYOG Intake
+              </button>
             </div>
 
             {error && (
@@ -257,94 +282,189 @@ export const StartInvestigationModal: React.FC<StartInvestigationModalProps> = (
               </div>
             )}
 
-            {/* Target Address & Network */}
-            <div className="space-y-1.5">
-              <label className="font-semibold text-slate-200 text-xs flex justify-between">
-                <span>Target Wallet Address *</span>
-                <span className="text-slate-400 font-normal">Hexadecimal (0x...) or BTC address</span>
-              </label>
-              <input
-                type="text"
-                required
-                placeholder="0x71C63B7282b0e6d6DE7d383921B0721Eb7118491"
-                value={startingAddress}
-                onChange={(e) => setStartingAddress(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded font-mono text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-cyan-500"
-              />
-            </div>
+            {/* TAB 1: MANUAL WALLET */}
+            {sourceTab === 'MANUAL' && (
+              <>
+                {/* Quick Preset Buttons */}
+                <div className="p-2.5 bg-slate-950/80 border border-slate-800 rounded">
+                  <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1.5">
+                    <span className="font-semibold uppercase tracking-wider text-[10px]">
+                      Quick Load Demo Cases
+                    </span>
+                    <span>Select verified flow</span>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => loadPreset('ransomware')}
+                      className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded text-slate-200 text-xs font-medium transition-colors"
+                    >
+                      Silver-Fox Ransomware (Binance)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => loadPreset('darknet')}
+                      className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded text-slate-200 text-xs font-medium transition-colors"
+                    >
+                      Darknet Vendor (Kraken)
+                    </button>
+                  </div>
+                </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {/* Network */}
-              <div className="space-y-1.5">
-                <label className="font-semibold text-slate-200 text-xs">Blockchain Network</label>
-                <select
-                  value={network}
-                  onChange={(e) => setNetwork(e.target.value as BlockchainNetwork)}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
-                >
-                  <option value="ethereum">Ethereum Mainnet (EVM)</option>
-                  <option value="bitcoin">Bitcoin Core (UTXO)</option>
-                  <option value="polygon">Polygon PoS</option>
-                  <option value="arbitrum">Arbitrum One</option>
-                </select>
-              </div>
+                {/* Target Address & Network */}
+                <div className="space-y-1.5">
+                  <label className="font-semibold text-slate-200 text-xs flex justify-between">
+                    <span>Target Wallet Address *</span>
+                    <span className="text-slate-400 font-normal">Hexadecimal (0x...) or BTC</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="0x71C63B7282b0e6d6DE7d383921B0721Eb7118491"
+                    value={startingAddress}
+                    onChange={(e) => setStartingAddress(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded font-mono text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
 
-              {/* Tracing Depth */}
-              <div className="space-y-1.5">
-                <label className="font-semibold text-slate-200 text-xs flex justify-between">
-                  <span>Max Tracing Hops</span>
-                  <span className="font-mono text-cyan-400">{maxHops} Hops</span>
-                </label>
-                <input
-                  type="range"
-                  min={1}
-                  max={6}
-                  value={maxHops}
-                  onChange={(e) => setMaxHops(Number(e.target.value))}
-                  className="w-full accent-cyan-500"
-                />
-              </div>
-            </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="font-semibold text-slate-200 text-xs">Blockchain Network</label>
+                    <select
+                      value={network}
+                      onChange={(e) => setNetwork(e.target.value as BlockchainNetwork)}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                    >
+                      <option value="ethereum">Ethereum Mainnet (EVM)</option>
+                      <option value="bitcoin">Bitcoin Core (UTXO)</option>
+                      <option value="tron">TRON (TRX)</option>
+                      <option value="bsc">BNB Chain (BSC)</option>
+                      <option value="polygon">Polygon PoS</option>
+                      <option value="arbitrum">Arbitrum One</option>
+                    </select>
+                  </div>
 
-            {/* Case Name & Reference ID */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <label className="font-semibold text-slate-200 text-xs">Case / Operation Name</label>
-                <input
-                  type="text"
-                  placeholder="e.g. Operation Sovereign Drain"
-                  value={caseName}
-                  onChange={(e) => setCaseName(e.target.value)}
-                  className="w-full px-3 py-1.5 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
-                />
+                  <div className="space-y-1.5">
+                    <label className="font-semibold text-slate-200 text-xs flex justify-between">
+                      <span>Max Tracing Hops</span>
+                      <span className="font-mono text-cyan-400">{maxHops} Hops</span>
+                    </label>
+                    <input
+                      type="range"
+                      min={1}
+                      max={6}
+                      value={maxHops}
+                      onChange={(e) => setMaxHops(Number(e.target.value))}
+                      className="w-full accent-cyan-500"
+                    />
+                  </div>
+                </div>
+
+                {/* Case Name & Reference ID */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="font-semibold text-slate-200 text-xs">Case / Operation Name</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Operation Sovereign Drain"
+                      value={caseName}
+                      onChange={(e) => setCaseName(e.target.value)}
+                      className="w-full px-3 py-1.5 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="font-semibold text-slate-200 text-xs">Reference / Case ID</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. CASE-2026-US-891"
+                      value={caseReference}
+                      onChange={(e) => setCaseReference(e.target.value)}
+                      className="w-full px-3 py-1.5 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* TAB 2: SAHYOG INTAKE */}
+            {sourceTab === 'SAHYOG' && (
+              <div className="space-y-3">
+                <div className="p-2.5 bg-cyan-950/30 border border-cyan-900/60 rounded flex items-center justify-between text-xs">
+                  <span className="font-mono text-cyan-300 font-medium flex items-center gap-1.5">
+                    <Server className="w-3.5 h-3.5" />
+                    <span>SAHYOG Gateway Adapter</span>
+                  </span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 bg-amber-950 text-amber-300 border border-amber-800">
+                    SAHYOG API NOT CONNECTED
+                  </span>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="font-semibold text-slate-200 text-xs block">
+                    Select DEMO SAHYOG Intake Case
+                  </label>
+                  <div className="space-y-2">
+                    {DEMO_SAHYOG_CASES.map((sc) => {
+                      const isSelected = selectedSahyog.caseId === sc.caseId;
+                      return (
+                        <button
+                          key={sc.caseId}
+                          type="button"
+                          onClick={() => setSelectedSahyog(sc)}
+                          className={`w-full p-2.5 text-left border rounded transition-colors cursor-pointer ${
+                            isSelected
+                              ? 'border-cyan-400 bg-cyan-950/40 text-white'
+                              : 'border-slate-800 bg-slate-950 text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          <div className="flex justify-between items-center text-[11px] font-mono">
+                            <span className="font-semibold text-cyan-300">{sc.caseId}</span>
+                            <span className="uppercase text-slate-400">{sc.network}</span>
+                          </div>
+                          <div className="text-xs text-slate-200 mt-0.5 font-medium">
+                            {sc.investigationType}
+                          </div>
+                          <div className="text-[10px] text-slate-400 mt-1 truncate">
+                            Suspect: {sc.walletAddress}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="space-y-1.5 pt-1">
+                  <label className="font-semibold text-slate-200 text-xs flex justify-between">
+                    <span>Max Tracing Hops</span>
+                    <span className="font-mono text-cyan-400">{maxHops} Hops</span>
+                  </label>
+                  <input
+                    type="range"
+                    min={1}
+                    max={6}
+                    value={maxHops}
+                    onChange={(e) => setMaxHops(Number(e.target.value))}
+                    className="w-full accent-cyan-500"
+                  />
+                </div>
               </div>
-              <div className="space-y-1.5">
-                <label className="font-semibold text-slate-200 text-xs">Reference / Case ID</label>
-                <input
-                  type="text"
-                  placeholder="e.g. CASE-2026-US-891"
-                  value={caseReference}
-                  onChange={(e) => setCaseReference(e.target.value)}
-                  className="w-full px-3 py-1.5 bg-slate-950 border border-slate-700 rounded text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-            </div>
+            )}
 
             {/* Mode: Demo vs Live */}
             <div className="pt-2 border-t border-slate-800 flex items-center justify-between">
               <div>
-                <span className="font-semibold text-slate-200 text-xs block">Execution Mode</span>
+                <span className="font-semibold text-slate-200 text-xs block">Consensus Query Mode</span>
                 <span className="text-slate-400 text-[11px]">
                   {mode === 'DEMO'
-                    ? 'Uses verified seed clusters & synthetic demonstrator data.'
-                    : 'Requires active RPC endpoint and consensus node access.'}
+                    ? 'Uses verified seed clusters & demonstrator data.'
+                    : 'Requires active on-chain consensus indexing.'}
                 </span>
               </div>
               <div className="flex items-center gap-1 p-0.5 bg-slate-950 border border-slate-800 rounded">
                 <button
                   type="button"
                   onClick={() => setMode('DEMO')}
-                  className={`px-3 py-1 rounded text-xs font-semibold transition-colors ${
+                  className={`px-3 py-1 rounded text-xs font-semibold transition-colors cursor-pointer ${
                     mode === 'DEMO'
                       ? 'bg-amber-950/80 text-amber-300 border border-amber-800'
                       : 'text-slate-400 hover:text-slate-200'
@@ -355,7 +475,7 @@ export const StartInvestigationModal: React.FC<StartInvestigationModalProps> = (
                 <button
                   type="button"
                   onClick={() => setMode('LIVE')}
-                  className={`px-3 py-1 rounded text-xs font-semibold transition-colors ${
+                  className={`px-3 py-1 rounded text-xs font-semibold transition-colors cursor-pointer ${
                     mode === 'LIVE'
                       ? 'bg-cyan-950/80 text-cyan-300 border border-cyan-800'
                       : 'text-slate-400 hover:text-slate-200'
@@ -371,16 +491,18 @@ export const StartInvestigationModal: React.FC<StartInvestigationModalProps> = (
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs font-medium transition-colors"
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs font-medium transition-colors cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                className="flex items-center gap-1.5 px-5 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-xs font-semibold shadow-md transition-colors"
+                className="flex items-center gap-1.5 px-5 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-xs font-semibold shadow-md transition-colors cursor-pointer"
               >
                 <Play className="w-3.5 h-3.5 fill-white" />
-                <span>Start Investigation</span>
+                <span>
+                  {sourceTab === 'SAHYOG' ? 'Import & Launch Investigation' : 'Start Investigation'}
+                </span>
               </button>
             </div>
           </form>

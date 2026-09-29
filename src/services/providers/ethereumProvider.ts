@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { BlockchainProviderAdapter, NormalizedTransaction } from './types';
+import { BlockchainProviderAdapter, NormalizedTransaction, ProviderQueryResult } from './types';
 
 export class EthereumProviderAdapter implements BlockchainProviderAdapter {
   network = 'ethereum' as const;
@@ -11,6 +11,8 @@ export class EthereumProviderAdapter implements BlockchainProviderAdapter {
   endpoint = 'https://eth.llamarpc.com';
   status = 'ONLINE' as const;
   authRequired = false;
+  indexerRequired = true;
+  indexerConfigHelp = 'Etherscan API Key (ETHERSCAN_API_KEY) or Alchemy/Infura indexer required for historical address transactions.';
   notes = 'JSON-RPC 2.0 gateway for EVM accounts, balances, and transaction receipts.';
 
   validateAddress(address: string): boolean {
@@ -46,8 +48,19 @@ export class EthereumProviderAdapter implements BlockchainProviderAdapter {
     address: string,
     options?: { maxTxs?: number; timeRangePreset?: string }
   ): Promise<NormalizedTransaction[]> {
-    // In live mode with public RPC, full historical transaction listing typically requires an indexer (like Etherscan API).
-    // If an Etherscan key is configured in env, it queries it; otherwise, returns empty array to signal unindexed provider.
-    return [];
+    const res = await this.fetchTransactionsWithStatus(address, options);
+    return res.transactions;
+  }
+
+  async fetchTransactionsWithStatus(
+    address: string,
+    options?: { maxTxs?: number; timeRangePreset?: string }
+  ): Promise<ProviderQueryResult> {
+    return {
+      transactions: [],
+      hasLiveIndexing: false,
+      indexerRequired: true,
+      statusMessage: 'Ethereum historical transaction indexer requires ETHERSCAN_API_KEY. Basic consensus RPCs do not index historical account transactions.',
+    };
   }
 }

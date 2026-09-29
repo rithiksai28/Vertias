@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { BlockchainProviderAdapter, NormalizedTransaction } from './types';
+import { BlockchainProviderAdapter, NormalizedTransaction, ProviderQueryResult } from './types';
 
 export class TronProviderAdapter implements BlockchainProviderAdapter {
   network = 'tron' as const;
@@ -11,6 +11,8 @@ export class TronProviderAdapter implements BlockchainProviderAdapter {
   endpoint = 'https://api.trongrid.io';
   status = 'REQUIRES_CONFIG' as const;
   authRequired = true;
+  indexerRequired = true;
+  indexerConfigHelp = 'TronGrid API key (TRONGRID_API_KEY) required to query TRC-20 USDT and TRX ledger transactions.';
   notes = 'TRON protocol indexer for TRC-20 USDT and TRX flows. Requires TronGrid API key for live queries.';
 
   validateAddress(address: string): boolean {
@@ -27,7 +29,19 @@ export class TronProviderAdapter implements BlockchainProviderAdapter {
     address: string,
     options?: { maxTxs?: number; timeRangePreset?: string }
   ): Promise<NormalizedTransaction[]> {
-    // API not connected yet without TRONGRID API key
-    return [];
+    const res = await this.fetchTransactionsWithStatus(address, options);
+    return res.transactions;
+  }
+
+  async fetchTransactionsWithStatus(
+    address: string,
+    options?: { maxTxs?: number; timeRangePreset?: string }
+  ): Promise<ProviderQueryResult> {
+    return {
+      transactions: [],
+      hasLiveIndexing: false,
+      indexerRequired: true,
+      statusMessage: 'TRON live transaction history requires TRONGRID_API_KEY. Public gateway authentication is unconfigured.',
+    };
   }
 }

@@ -100,6 +100,20 @@ export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
                   DEMO DATASET
                 </span>
               )}
+              {investigation.mode === 'LIVE' && (
+                <span className="font-mono text-[10px] text-emerald-400 bg-emerald-950/30 px-1.5 py-0.5 border border-emerald-900/40">
+                  LIVE ON-CHAIN
+                </span>
+              )}
+              {investigation.source === 'SAHYOG' && (
+                <span className="font-mono text-[10px] text-cyan-300 bg-cyan-950/50 px-2 py-0.5 border border-cyan-800/70 flex items-center gap-1">
+                  <span>🛡️</span>
+                  <span>{investigation.sahyogMetadata?.isDemo ? 'DEMO SAHYOG INTAKE' : 'SAHYOG CASE'}</span>
+                  {investigation.sahyogMetadata?.metadata?.firNumber && (
+                    <span className="text-zinc-400 hidden sm:inline">({investigation.sahyogMetadata.metadata.firNumber})</span>
+                  )}
+                </span>
+              )}
             </div>
 
             <div className="flex items-center gap-2 text-xs text-[#7e8695] font-mono mt-0.5">
@@ -208,6 +222,30 @@ export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Tracing Diagnostic & SAHYOG Intake Particulars Bar */}
+        {(investigation.tracingDiagnostic || (investigation.source === 'SAHYOG' && investigation.sahyogMetadata)) && (
+          <div className="mt-2.5 pt-2 border-t border-[#181d26] flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+            {investigation.source === 'SAHYOG' && investigation.sahyogMetadata && (
+              <div className="flex items-center gap-2 text-cyan-300/90">
+                <span className="text-[10px] uppercase font-bold text-cyan-400 bg-cyan-950/60 px-1.5 py-0.2 border border-cyan-800/60">
+                  SAHYOG INTAKE
+                </span>
+                <span>Agency: {investigation.sahyogMetadata.complainantAgency || 'Cyber Crime Division'}</span>
+                <span>·</span>
+                <span>Offense: {investigation.sahyogMetadata.statutoryOffense || 'IT Act / IPC'}</span>
+              </div>
+            )}
+            {investigation.tracingDiagnostic && (
+              <div className="flex items-center gap-2 text-amber-300/90">
+                <span className="text-[10px] uppercase font-bold text-amber-400 bg-amber-950/60 px-1.5 py-0.2 border border-amber-800/60">
+                  LEDGER STATUS
+                </span>
+                <span>{investigation.tracingDiagnostic}</span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* --------------------------------------------------

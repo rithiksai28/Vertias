@@ -13,6 +13,9 @@ import {
   TransactionEdge,
   InvestigationFinding,
   WalletClassification,
+  CommonInvestigationRequest,
+  InvestigationSource,
+  SahyogIntakePayload,
 } from '../types/investigation';
 import {
   SEED_INVESTIGATION,
@@ -34,9 +37,16 @@ const STORAGE_KEYS = {
 };
 
 class ForensicStorageEngine {
+  private memoryStore: Map<string, string> = new Map();
+
   private get<T>(key: string, defaultVal: T): T {
     try {
-      const data = localStorage.getItem(key);
+      let data: string | null = null;
+      if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
+        data = window.localStorage.getItem(key);
+      } else {
+        data = this.memoryStore.get(key) || null;
+      }
       return data ? JSON.parse(data) : defaultVal;
     } catch (e) {
       return defaultVal;
@@ -45,7 +55,11 @@ class ForensicStorageEngine {
 
   private set<T>(key: string, value: T): void {
     try {
-      localStorage.setItem(key, JSON.stringify(value));
+      const str = JSON.stringify(value);
+      if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
+        window.localStorage.setItem(key, str);
+      }
+      this.memoryStore.set(key, str);
     } catch (e) {
       console.warn('Storage write failed', e);
     }
@@ -174,21 +188,40 @@ class ForensicStorageEngine {
 
   // Multi-hop tracing graph synthesis with live query adapter & intelligence engine
   public async createInvestigation(params: {
-    caseName: string;
-    caseReference: string;
+    caseName?: string;
+    caseReference?: string;
     startingAddress: string;
     network: BlockchainNetwork;
     maxHops: number;
     mode: 'DEMO' | 'LIVE';
     timeRangePreset?: 'all' | '24h' | '7d' | '30d' | '90d';
+    source?: InvestigationSource;
+    sahyogMetadata?: SahyogIntakePayload;
   }): Promise<Investigation> {
-    const { caseName, caseReference, startingAddress, network, maxHops, mode, timeRangePreset } = params;
+    const source: InvestigationSource = params.source || (params.sahyogMetadata ? 'SAHYOG' : 'MANUAL');
+    const startingAddress = params.startingAddress.trim();
+    const network = params.network;
+    const maxHops = Math.max(1, Math.min(params.maxHops || 4, 6));
+    const mode = params.mode || 'DEMO';
+    const timeRangePreset = params.timeRangePreset || '30d';
+    const sahyogMetadata = params.sahyogMetadata;
+
+    const caseName = params.caseName?.trim() ||
+      (source === 'SAHYOG' && sahyogMetadata?.caseId
+        ? `[SAHYOG] ${sahyogMetadata.caseId} — ${sahyogMetadata.investigationType || 'Suspect Wallet Inquiry'}`
+        : `Investigation ${startingAddress.slice(0, 8)}...`);
+
+    const caseReference = params.caseReference?.trim() ||
+      (source === 'SAHYOG' && sahyogMetadata?.caseId
+        ? sahyogMetadata.caseId
+        : `CASE-2026-${Date.now().toString().slice(-4)}`);
 
     const nodes: WalletNode[] = [];
     const edges: TransactionEdge[] = [];
     const findings: InvestigationFinding[] = [];
     const primaryPath: string[] = [startingAddress];
     const visited = new Set<string>([startingAddress.toLowerCase()]);
+    let tracingDiagnostic: string | undefined;
 
     // Network asset & valuation defaults
     const assetMap: Record<BlockchainNetwork, { asset: string; price: number; initialVol: string }> = {
@@ -214,74 +247,175 @@ class ForensicStorageEngine {
     let initialBalance = `0.05 ${asset}`;
     let isLiveTraced = false;
 
-    // LIVE MODE: Attempt real-time query via connected provider adapter
+    // =========================================================================
+    // PATH A: LIVE MODE (REAL BLOCKCHAIN DATA ONLY - NO SYNTHETIC RANDOM NODES)
+    // =========================================================================
     if (mode === 'LIVE') {
       try {
+        // Query live balance of root starting address
         const liveBal = await providerRegistry.fetchBalance(network, startingAddress);
-        if (liveBal.balance && liveBal.balance !== '0.00') {
+        if (liveBal.balance && liveBal.balance !== '0.00' && liveBal.balance !== '0.0000 BTC') {
           initialBalance = liveBal.balance;
         }
 
-        const liveTxs = await providerRegistry.fetchTransactions(network, startingAddress, {
-          maxTxs: 10,
-          timeRangePreset,
-        });
+        // Setup Queue for BFS Multi-hop on-chain traversal
+        let currentHopAddresses = [startingAddress];
 
-        if (liveTxs.length > 0) {
-          isLiveTraced = true;
-          // Build live hop 1 edges directly from verified on-chain transactions
-          for (let i = 0; i < Math.min(liveTxs.length, 3); i++) {
-            const tx = liveTxs[i];
-            const recipient = tx.to;
-            if (!visited.has(recipient.toLowerCase())) {
+        for (let hop = 1; hop <= maxHops && currentHopAddresses.length > 0; hop++) {
+          const nextHopAddresses: string[] = [];
+
+          for (const currentAddr of currentHopAddresses) {
+            // Fetch real on-chain outgoing transactions from currentAddr
+            const queryRes = await providerRegistry.fetchTransactionsWithStatus(network, currentAddr, {
+              maxTxs: 12,
+              timeRangePreset,
+              direction: 'outgoing',
+            });
+
+            const outTxs = queryRes.transactions || [];
+
+            // If no live indexing or 0 outgoing transactions: halt this branch honestly
+            if (outTxs.length === 0) {
+              if (hop === 1 && currentHopAddresses.length === 1) {
+                tracingDiagnostic = `No outgoing transactions found on-chain for ${currentAddr}. Tracing stopped: Funds remain at terminal unspent holding address.`;
+              }
+              continue;
+            }
+
+            isLiveTraced = true;
+
+            // Filter valid outgoing recipients (excluding change back to currentAddr and unparsed scripts)
+            const validTxs = outTxs.filter(
+              (tx) =>
+                tx.to &&
+                tx.to !== 'Unparsed_Script_Output' &&
+                tx.to.toLowerCase() !== currentAddr.toLowerCase()
+            );
+
+            if (validTxs.length === 0) {
+              continue;
+            }
+
+            // Trace up to 2 primary outgoing branches (prioritizing highest volume)
+            const branchesToFollow = validTxs.slice(0, 2);
+
+            for (let i = 0; i < branchesToFollow.length; i++) {
+              const tx = branchesToFollow[i];
+              const recipient = tx.to;
+
+              // Loop / Cycle Detection on real ledger data
+              if (visited.has(recipient.toLowerCase())) {
+                findings.push({
+                  id: `find-loop-${hop}-${Date.now()}-${i}`,
+                  investigationId: `inv-${Date.now()}`,
+                  type: 'CIRCULAR_ROUTING',
+                  severity: 'ELEVATED',
+                  title: 'Circular Re-routing Detected on Ledger',
+                  description: `Address ${recipient.slice(0, 10)}... was previously visited in earlier hops. Traversal halted on this branch to prevent graph cycle.`,
+                  hop,
+                  confidence: 'HIGH',
+                  supportingEvidence: `On-chain tx ${tx.hash} redirects back to previously visited node ${recipient}.`,
+                });
+
+                // Add cyclical edge to complete graph topology
+                edges.push({
+                  id: `tx-live-${tx.hash.slice(0, 12)}-${hop}`,
+                  txHash: tx.hash,
+                  network,
+                  from: currentAddr,
+                  to: recipient,
+                  amount: tx.amount,
+                  asset,
+                  timestamp: tx.timestamp,
+                  hop,
+                  blockNumber: tx.blockNumber,
+                  fee: tx.fee || 'Standard on-chain fee',
+                  usdValueEstimate: `$${Math.round(Number(tx.amount) * unitPrice).toLocaleString()}`,
+                  isPrimaryPath: i === 0,
+                });
+                continue;
+              }
+
               visited.add(recipient.toLowerCase());
-              primaryPath.push(recipient);
+              if (i === 0) primaryPath.push(recipient);
 
+              // Match recipient against verified attribution database
               const recClass = classificationEngine.classifyAddress(recipient, network, allAttributions);
+
+              // Query recipient live balance
+              let recBalance = `0.00 ${asset}`;
+              try {
+                const b = await providerRegistry.fetchBalance(network, recipient);
+                if (b.balance) recBalance = b.balance;
+              } catch {
+                recBalance = `${tx.amount} ${asset}`;
+              }
+
+              const isDirectDeposit = recClass.isDirectDepositAccepting;
 
               nodes.push({
                 id: recipient,
                 address: recipient,
                 network,
-                role: 'intermediate',
-                hop: 1,
+                role: isDirectDeposit ? 'destination' : 'intermediate',
+                hop,
                 attributionStatus: recClass.entityName ? 'known' : 'unidentified',
                 walletClassification: recClass.classification,
                 entityName: recClass.entityName,
                 entityType: recClass.entityType as any,
                 confidence: recClass.confidence,
+                confidenceScore: recClass.confidenceScore,
+                confidenceExplanation: recClass.confidenceExplanation,
+                confidenceInterpretation: recClass.confidenceInterpretation,
                 confidenceReasoning: recClass.confidenceReasoning,
-                balance: `0.02 ${asset}`,
+                isDirectDepositVasp: isDirectDeposit,
+                balance: recBalance,
                 asset,
                 incomingVolume: `${tx.amount} ${asset}`,
                 outgoingVolume: `0.00 ${asset}`,
-                txCount: 4,
+                txCount: 1,
                 firstSeen: tx.timestamp,
                 lastSeen: tx.timestamp,
                 isSuspicious: !recClass.entityName,
-                notes: recClass.notes || 'Identified via live on-chain consensus indexer.',
+                notes: recClass.entityName
+                  ? `Verified endpoint attributed to ${recClass.entityName}.`
+                  : `Hop ${hop} transit node verified on ${network.toUpperCase()} consensus ledger.`,
               });
 
               edges.push({
-                id: `tx-live-${tx.hash.slice(0, 10)}`,
+                id: `tx-live-${tx.hash.slice(0, 12)}-${hop}`,
                 txHash: tx.hash,
                 network,
-                from: startingAddress,
+                from: currentAddr,
                 to: recipient,
                 amount: tx.amount,
                 asset,
                 timestamp: tx.timestamp,
-                hop: 1,
+                hop,
                 blockNumber: tx.blockNumber,
                 fee: tx.fee || 'Standard on-chain fee',
                 usdValueEstimate: `$${Math.round(Number(tx.amount) * unitPrice).toLocaleString()}`,
                 isPrimaryPath: i === 0,
               });
+
+              // If recipient is a direct deposit VASP, funds reached custody: halt this branch
+              if (!isDirectDeposit) {
+                nextHopAddresses.push(recipient);
+              }
             }
           }
+
+          currentHopAddresses = nextHopAddresses;
+          if (currentHopAddresses.length === 0 && hop < maxHops) {
+            if (!tracingDiagnostic && nodes.length > 0) {
+              tracingDiagnostic = `Multi-hop tracing completed at Hop ${hop}: All branches terminated naturally at unspent holding addresses or verified custodial endpoints.`;
+            }
+            break;
+          }
         }
-      } catch (err) {
-        console.warn('[TraceEngine] Live ledger query fallback:', err);
+      } catch (err: any) {
+        console.warn('[TraceEngine] Live ledger query exception:', err);
+        tracingDiagnostic = `Live query interrupted: ${err?.message || 'Provider connection issue'}. Tracing halted without generating synthetic data.`;
       }
     }
 
@@ -298,170 +432,177 @@ class ForensicStorageEngine {
       entityName: sourceClass.entityName,
       entityType: sourceClass.entityType as any,
       confidence: sourceClass.confidence,
+      confidenceScore: sourceClass.confidenceScore,
+      confidenceExplanation: sourceClass.confidenceExplanation,
+      confidenceInterpretation: sourceClass.confidenceInterpretation,
       confidenceReasoning: sourceClass.confidenceReasoning,
       balance: initialBalance,
       asset,
       incomingVolume: `${initialVolume} ${asset}`,
       outgoingVolume: `${(Number(initialVolume) * 0.98).toFixed(2)} ${asset}`,
-      txCount: isLiveTraced ? 12 : 8,
+      txCount: isLiveTraced ? Math.max(edges.length + 1, 4) : 8,
       firstSeen: new Date(Date.now() - 86400000 * 14).toISOString(),
       lastSeen: new Date(Date.now() - 3600000 * 4).toISOString(),
       isSuspicious: true,
       notes: isLiveTraced
         ? `Live on-chain query executed via ${providerRegistry.getAdapter(network)?.name || network}.`
-        : `Deterministic forensic investigation horizon for ${network} ledger.`,
+        : `Forensic investigation initialized targeting ${startingAddress} on ${network.toUpperCase()}.`,
     });
 
-    // Multi-Hop Path Synthesis (if live didn't reach terminal or in DEMO mode)
-    const startHop = edges.length > 0 ? 2 : 1;
-    let previousAddress = primaryPath[primaryPath.length - 1] || startingAddress;
-    let currentAmount = Number(initialVolume);
+    // =========================================================================
+    // PATH B: DEMO MODE (SIMULATED SCENARIO MODELING FOR TESTING / TRAINING)
+    // =========================================================================
+    if (mode === 'DEMO') {
+      const startHop = 1;
+      let previousAddress = startingAddress;
+      let currentAmount = Number(initialVolume);
 
-    for (let hop = startHop; hop <= maxHops; hop++) {
-      const isTerminal = hop === maxHops;
-      let hopAddr: string;
+      for (let hop = startHop; hop <= maxHops; hop++) {
+        const isTerminal = hop === maxHops;
+        let hopAddr: string;
 
-      if (isTerminal) {
-        hopAddr = vaspAttribution.address;
-      } else {
-        if (network === 'bitcoin') {
-          hopAddr = `bc1q${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}`;
-        } else if (network === 'tron') {
-          hopAddr = `T${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 12)}Z`;
-        } else if (network === 'solana') {
-          hopAddr = `${Math.random().toString(36).slice(2, 12)}${Math.random().toString(36).slice(2, 12)}SOL`;
+        if (isTerminal) {
+          hopAddr = vaspAttribution.address;
         } else {
-          hopAddr = `0x${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}b${hop}8`;
+          if (network === 'bitcoin') {
+            hopAddr = `bc1q${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}`;
+          } else if (network === 'tron') {
+            hopAddr = `T${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 12)}Z`;
+          } else if (network === 'solana') {
+            hopAddr = `${Math.random().toString(36).slice(2, 12)}${Math.random().toString(36).slice(2, 12)}SOL`;
+          } else {
+            hopAddr = `0x${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}b${hop}8`;
+          }
         }
-      }
 
-      // Loop & Cycle Detection
-      if (visited.has(hopAddr.toLowerCase())) {
-        findings.push({
-          id: `find-loop-${hop}-${Date.now()}`,
-          investigationId: `inv-${Date.now()}`,
-          type: 'CIRCULAR_ROUTING',
-          severity: 'ELEVATED',
-          title: 'Circular Re-routing Detected on Ledger',
-          description: `Address ${hopAddr.slice(0, 10)}... was previously encountered in earlier hops. Traversal halted on this branch to prevent graph cycle.`,
-          hop,
-          confidence: 'HIGH',
-          supportingEvidence: 'Cycle detected in directed graph adjacency matrix.',
-        });
-        break;
-      }
+        // Loop & Cycle Detection
+        if (visited.has(hopAddr.toLowerCase())) {
+          findings.push({
+            id: `find-loop-${hop}-${Date.now()}`,
+            investigationId: `inv-${Date.now()}`,
+            type: 'CIRCULAR_ROUTING',
+            severity: 'ELEVATED',
+            title: 'Circular Re-routing Detected on Ledger',
+            description: `Address ${hopAddr.slice(0, 10)}... was previously encountered in earlier hops. Traversal halted on this branch to prevent graph cycle.`,
+            hop,
+            confidence: 'HIGH',
+            supportingEvidence: 'Cycle detected in directed graph adjacency matrix.',
+          });
+          break;
+        }
 
-      visited.add(hopAddr.toLowerCase());
-      primaryPath.push(hopAddr);
+        visited.add(hopAddr.toLowerCase());
+        primaryPath.push(hopAddr);
 
-      const transferAmount = (currentAmount * (isTerminal ? 0.85 : 0.88)).toFixed(2);
-      const hopClass = classificationEngine.classifyAddress(hopAddr, network, allAttributions);
-
-      nodes.push({
-        id: hopAddr,
-        address: hopAddr,
-        network,
-        role: isTerminal ? 'destination' : 'intermediate',
-        hop,
-        attributionStatus: isTerminal ? 'known' : hopClass.entityName ? 'associated' : 'unidentified',
-        walletClassification: isTerminal ? 'Exchange Deposit Wallet' : hopClass.classification,
-        entityId: isTerminal ? vaspAttribution.entityId : undefined,
-        entityName: isTerminal ? vaspAttribution.entityName : hopClass.entityName,
-        entityType: isTerminal ? vaspAttribution.entityType : (hopClass.entityType as any),
-        confidence: isTerminal ? vaspAttribution.confidence : hopClass.confidence,
-        confidenceScore: isTerminal ? (vaspAttribution.confidenceScore ?? 87) : hopClass.confidenceScore,
-        confidenceExplanation: isTerminal
-          ? (vaspAttribution.confidenceExplanation ??
-            'Known exchange deposit address, supported by multiple attribution sources and a direct transaction relationship.')
-          : hopClass.confidenceExplanation,
-        confidenceInterpretation: isTerminal
-          ? (vaspAttribution.confidenceInterpretation ?? 'Strong supporting evidence')
-          : hopClass.confidenceInterpretation,
-        confidenceReasoning: isTerminal ? vaspAttribution.confidenceReasoning : hopClass.confidenceReasoning,
-        isDirectDepositVasp: isTerminal,
-        balance: isTerminal ? `${transferAmount} ${asset}` : `0.02 ${asset}`,
-        asset,
-        incomingVolume: `${transferAmount} ${asset}`,
-        outgoingVolume: isTerminal ? `0.00 ${asset}` : `${(Number(transferAmount) * 0.95).toFixed(2)} ${asset}`,
-        txCount: isTerminal ? 1420 : 3,
-        firstSeen: new Date(Date.now() - 86400000 * (14 - hop)).toISOString(),
-        lastSeen: new Date().toISOString(),
-        isSuspicious: !isTerminal,
-        notes: isTerminal
-          ? `Verified direct-deposit endpoint attributed to ${vaspAttribution.entityName}.`
-          : `Hop ${hop} intermediary transit node. Classification: ${hopClass.classification}.`,
-      });
-
-      const txHash = network === 'bitcoin'
-        ? `${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`
-        : `0x${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
-
-      edges.push({
-        id: `tx-hop-${hop}-${Date.now()}`,
-        txHash,
-        network,
-        from: previousAddress,
-        to: hopAddr,
-        amount: transferAmount,
-        asset,
-        timestamp: new Date(Date.now() - 3600000 * (maxHops - hop) * 4).toISOString(),
-        hop,
-        blockNumber: network === 'bitcoin' ? 884900 + hop * 3 : 19482000 + hop * 100,
-        fee: network === 'bitcoin' ? '0.0008 BTC (14 sat/vB)' : '0.0021 ETH',
-        usdValueEstimate: `$${Math.round(Number(transferAmount) * unitPrice).toLocaleString()}`,
-        isPrimaryPath: true,
-      });
-
-      // Intermediate branch peeling for multi-hop realism
-      if (!isTerminal && hop === 2) {
-        const peelAddress = network === 'bitcoin'
-          ? `bc1qp${Math.random().toString(16).slice(2, 10)}peel${Math.random().toString(16).slice(2, 6)}`
-          : `0x${Math.random().toString(16).slice(2, 10)}peel${Math.random().toString(16).slice(2, 8)}`;
-        const peelAmount = (Number(transferAmount) * 0.12).toFixed(2);
+        const transferAmount = (currentAmount * (isTerminal ? 0.85 : 0.88)).toFixed(2);
+        const hopClass = classificationEngine.classifyAddress(hopAddr, network, allAttributions);
 
         nodes.push({
-          id: peelAddress,
-          address: peelAddress,
+          id: hopAddr,
+          address: hopAddr,
           network,
-          role: 'intermediate',
+          role: isTerminal ? 'destination' : 'intermediate',
           hop,
-          attributionStatus: 'unidentified',
-          walletClassification: 'Unknown / Unattributed',
-          balance: `${peelAmount} ${asset}`,
+          attributionStatus: isTerminal ? 'known' : hopClass.entityName ? 'associated' : 'unidentified',
+          walletClassification: isTerminal ? 'Exchange Deposit Wallet' : hopClass.classification,
+          entityId: isTerminal ? vaspAttribution.entityId : undefined,
+          entityName: isTerminal ? vaspAttribution.entityName : hopClass.entityName,
+          entityType: isTerminal ? vaspAttribution.entityType : (hopClass.entityType as any),
+          confidence: isTerminal ? vaspAttribution.confidence : hopClass.confidence,
+          confidenceScore: isTerminal ? (vaspAttribution.confidenceScore ?? 87) : hopClass.confidenceScore,
+          confidenceExplanation: isTerminal
+            ? (vaspAttribution.confidenceExplanation ??
+              'Known exchange deposit address, supported by multiple attribution sources and a direct transaction relationship.')
+            : hopClass.confidenceExplanation,
+          confidenceInterpretation: isTerminal
+            ? (vaspAttribution.confidenceInterpretation ?? 'Strong supporting evidence')
+            : hopClass.confidenceInterpretation,
+          confidenceReasoning: isTerminal ? vaspAttribution.confidenceReasoning : hopClass.confidenceReasoning,
+          isDirectDepositVasp: isTerminal,
+          balance: isTerminal ? `${transferAmount} ${asset}` : `0.02 ${asset}`,
           asset,
-          incomingVolume: `${peelAmount} ${asset}`,
-          outgoingVolume: `0.00 ${asset}`,
-          txCount: 1,
-          firstSeen: new Date().toISOString(),
+          incomingVolume: `${transferAmount} ${asset}`,
+          outgoingVolume: isTerminal ? `0.00 ${asset}` : `${(Number(transferAmount) * 0.95).toFixed(2)} ${asset}`,
+          txCount: isTerminal ? 1420 : 3,
+          firstSeen: new Date(Date.now() - 86400000 * (14 - hop)).toISOString(),
           lastSeen: new Date().toISOString(),
-          isSuspicious: true,
-          notes: 'Peeling residue holding address.',
+          isSuspicious: !isTerminal,
+          notes: isTerminal
+            ? `Verified direct-deposit endpoint attributed to ${vaspAttribution.entityName}.`
+            : `Hop ${hop} intermediary transit node. Classification: ${hopClass.classification}.`,
         });
+
+        const txHash = network === 'bitcoin'
+          ? `${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`
+          : `0x${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
 
         edges.push({
-          id: `tx-peel-${Date.now()}`,
-          txHash: network === 'bitcoin'
-            ? `${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`
-            : `0x${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`,
+          id: `tx-hop-${hop}-${Date.now()}`,
+          txHash,
           network,
           from: previousAddress,
-          to: peelAddress,
-          amount: peelAmount,
+          to: hopAddr,
+          amount: transferAmount,
           asset,
-          timestamp: new Date(Date.now() - 3600000 * (maxHops - hop) * 4 + 60000).toISOString(),
+          timestamp: new Date(Date.now() - 3600000 * (maxHops - hop) * 4).toISOString(),
           hop,
-          blockNumber: network === 'bitcoin' ? 884900 + hop * 3 + 1 : 19482000 + hop * 100 + 1,
-          fee: network === 'bitcoin' ? '0.0004 BTC' : '0.0018 ETH',
-          usdValueEstimate: `$${Math.round(Number(peelAmount) * unitPrice).toLocaleString()}`,
-          isPrimaryPath: false,
+          blockNumber: network === 'bitcoin' ? 884900 + hop * 3 : 19482000 + hop * 100,
+          fee: network === 'bitcoin' ? '0.0008 BTC (14 sat/vB)' : '0.0021 ETH',
+          usdValueEstimate: `$${Math.round(Number(transferAmount) * unitPrice).toLocaleString()}`,
+          isPrimaryPath: true,
         });
-      }
 
-      previousAddress = hopAddr;
-      currentAmount = Number(transferAmount);
+        // Intermediate branch peeling for multi-hop realism
+        if (!isTerminal && hop === 2) {
+          const peelAddress = network === 'bitcoin'
+            ? `bc1qp${Math.random().toString(16).slice(2, 10)}peel${Math.random().toString(16).slice(2, 6)}`
+            : `0x${Math.random().toString(16).slice(2, 10)}peel${Math.random().toString(16).slice(2, 8)}`;
+          const peelAmount = (Number(transferAmount) * 0.12).toFixed(2);
+
+          nodes.push({
+            id: peelAddress,
+            address: peelAddress,
+            network,
+            role: 'intermediate',
+            hop,
+            attributionStatus: 'unidentified',
+            walletClassification: 'Unknown / Unattributed',
+            balance: `${peelAmount} ${asset}`,
+            asset,
+            incomingVolume: `${peelAmount} ${asset}`,
+            outgoingVolume: `0.00 ${asset}`,
+            txCount: 1,
+            firstSeen: new Date().toISOString(),
+            lastSeen: new Date().toISOString(),
+            isSuspicious: true,
+            notes: 'Peeling residue holding address.',
+          });
+
+          edges.push({
+            id: `tx-peel-${Date.now()}`,
+            txHash: network === 'bitcoin'
+              ? `${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`
+              : `0x${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`,
+            network,
+            from: previousAddress,
+            to: peelAddress,
+            amount: peelAmount,
+            asset,
+            timestamp: new Date(Date.now() - 3600000 * (maxHops - hop) * 4 + 60000).toISOString(),
+            hop,
+            blockNumber: network === 'bitcoin' ? 884900 + hop * 3 + 1 : 19482000 + hop * 100 + 1,
+            fee: network === 'bitcoin' ? '0.0004 BTC' : '0.0018 ETH',
+            usdValueEstimate: `$${Math.round(Number(peelAmount) * unitPrice).toLocaleString()}`,
+            isPrimaryPath: false,
+          });
+        }
+
+        previousAddress = hopAddr;
+        currentAmount = Number(transferAmount);
+      }
     }
 
-    // Run Nearest Direct-Deposit VASP Engine
+    // Run Nearest Direct-Deposit VASP Engine (Unified for both modes)
     const nearestVasp = nearestVaspEngine.findNearestDirectDepositVasp(nodes, edges, startingAddress);
 
     // Run Risk Intelligence Engine
@@ -513,20 +654,26 @@ class ForensicStorageEngine {
 
     const newInv: Investigation = {
       id: `inv-${Date.now()}`,
-      caseName: caseName || `Case ${startingAddress.slice(0, 8)}`,
-      caseReference: caseReference || `REF-${Date.now().toString().slice(-6)}`,
+      caseName,
+      caseReference,
       startingAddress,
       network,
       status: 'completed',
       maxHops,
       mode,
-      timeRangePreset: timeRangePreset || '30d',
+      dataMode: mode,
+      source,
+      sahyogMetadata,
+      tracingDiagnostic,
+      timeRangePreset,
       notes: [
         {
           id: `note-${Date.now()}`,
-          author: 'Automated Forensic Tracing Engine',
+          author: source === 'SAHYOG' ? 'SAHYOG Gateway Intake Engine' : 'Automated Forensic Tracing Engine',
           timestamp: new Date().toISOString(),
-          text: `Investigation initialized targeting ${startingAddress} on ${network.toUpperCase()}. Multi-hop depth evaluated: ${maxHops} layers. Nearest direct-deposit VASP: ${nearestVasp.vaspName || 'None identified'}. Risk Score: ${riskBreakdown.totalScore}/100 (${riskBreakdown.riskLevel}).`,
+          text: source === 'SAHYOG'
+            ? `SAHYOG Case Intake processed [${sahyogMetadata?.caseId || caseReference}]. Suspect address: ${startingAddress} on ${network.toUpperCase()}. Traced ${nodes.length} nodes across ${edges.length} on-chain transfers. Nearest direct-deposit VASP: ${nearestVasp.vaspName || 'None identified'}. Risk Score: ${riskBreakdown.totalScore}/100 (${riskBreakdown.riskLevel}).`
+            : `Investigation initialized targeting ${startingAddress} on ${network.toUpperCase()}. Multi-hop depth evaluated: ${maxHops} layers. Nearest direct-deposit VASP: ${nearestVasp.vaspName || 'None identified'}. Risk Score: ${riskBreakdown.totalScore}/100 (${riskBreakdown.riskLevel}).`,
         },
       ],
       createdAt: new Date().toISOString(),
@@ -538,23 +685,23 @@ class ForensicStorageEngine {
         walletsTracedCount: nodes.length,
         entitiesMatchedCount: nodes.filter((n) => n.entityName).length,
         unattributedCount,
-        finalKnownEntity: nearestVasp.vaspName || vaspAttribution.entityName,
-        finalConfidence: nearestVasp.confidence || vaspAttribution.confidence,
-        finalConfidenceScore: nearestVasp.confidenceScore ?? vaspAttribution.confidenceScore ?? 87,
+        finalKnownEntity: nearestVasp.vaspName || (mode === 'DEMO' ? vaspAttribution.entityName : undefined),
+        finalConfidence: nearestVasp.confidence || (mode === 'DEMO' ? vaspAttribution.confidence : 'UNKNOWN'),
+        finalConfidenceScore: nearestVasp.confidenceScore ?? (mode === 'DEMO' ? (vaspAttribution.confidenceScore ?? 87) : 0),
         finalConfidenceExplanation:
           nearestVasp.confidenceExplanation ??
-          vaspAttribution.confidenceExplanation ??
-          'Known exchange deposit address, supported by multiple attribution sources and a direct transaction relationship.',
+          (mode === 'DEMO'
+            ? (vaspAttribution.confidenceExplanation ?? 'Known exchange deposit address, supported by multiple attribution sources and a direct transaction relationship.')
+            : 'No direct-deposit VASP cluster identified in traced branch.'),
         finalConfidenceInterpretation:
           nearestVasp.confidenceInterpretation ??
-          vaspAttribution.confidenceInterpretation ??
-          'Strong supporting evidence',
-        finalConfidenceReasoning: nearestVasp.confidenceReasoning || vaspAttribution.confidenceReasoning,
+          (mode === 'DEMO' ? (vaspAttribution.confidenceInterpretation ?? 'Strong supporting evidence') : 'Insufficient evidence to calculate a meaningful score'),
+        finalConfidenceReasoning: nearestVasp.confidenceReasoning || (mode === 'DEMO' ? vaspAttribution.confidenceReasoning : []),
         nearestDirectDepositVasp: nearestVasp,
         riskScoreBreakdown: riskBreakdown,
-        isDirectTransfer: nearestVasp.isDirectDeposit ?? (maxHops === 1),
+        isDirectTransfer: nearestVasp.isDirectDeposit ?? false,
         totalVolumeTraced: `${initialVolume} ${asset}`,
-        hopsExplored: maxHops,
+        hopsExplored: nodes.length > 1 ? Math.max(...nodes.map((n) => n.hop)) : 0,
         primaryPath,
       },
       nodes,

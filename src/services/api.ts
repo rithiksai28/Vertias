@@ -22,13 +22,15 @@ export const apiClient = {
   },
 
   async createInvestigation(params: {
-    caseName: string;
-    caseReference: string;
+    caseName?: string;
+    caseReference?: string;
     startingAddress: string;
     network: BlockchainNetwork;
     maxHops: number;
     mode: 'DEMO' | 'LIVE';
     timeRangePreset?: 'all' | '24h' | '7d' | '30d' | '90d';
+    source?: 'MANUAL' | 'SAHYOG';
+    sahyogMetadata?: any;
   }): Promise<Investigation> {
     return forensicStorage.createInvestigation(params);
   },
